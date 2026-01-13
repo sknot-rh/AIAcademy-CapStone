@@ -258,10 +258,13 @@ def run_agent_workflow(question):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pdf", type=str)
+    parser.add_argument("--audio", type=str)
     parser.add_argument("--query", type=str)
     args = parser.parse_args()
 
     if args.pdf: ingest_data(pdf_path=args.pdf)
+
+    if args.audio: ingest_data(audio_path=args.audio)
 
     if args.query:
         print(f"\n🚀 STARTING AGENT FOR: '{args.query}'\n")
