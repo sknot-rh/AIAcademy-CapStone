@@ -17,7 +17,8 @@ from langchain_community.tools import DuckDuckGoSearchRun
 # --- CONFIGURATION ---
 BASE_URL = "http://localhost:1234/v1"
 QDRANT_URL = "http://localhost:6333"
-COLLECTION_NAME = "agent_db"
+COLLECTION_NAME = "rag_db"
+VECTOR_SIZE = 384  # Must match the embedding model (All-MiniLM-L6-v2)
 
 # LLM & Embeddings
 local_llm = ChatOpenAI(
@@ -27,6 +28,7 @@ local_llm = ChatOpenAI(
     temperature=0
 )
 
+# ⚠️ CRITICAL: Ensure LM Studio has an embedding model loaded, or points to the right one.
 embeddings = OpenAIEmbeddings(
     base_url=BASE_URL,
     api_key="lm-studio",
@@ -36,6 +38,25 @@ embeddings = OpenAIEmbeddings(
 
 client = QdrantClient(url=QDRANT_URL)
 search_tool = DuckDuckGoSearchRun()
+
+
+# --- PART 0: DIAGNOSTICS (NEW) ---
+
+def check_collection_status():
+    """Checks if the collection exists and has data."""
+    print("--- 🛠️ DIAGNOSTIC: Checking Qdrant Collection ---")
+    if not client.collection_exists(COLLECTION_NAME):
+        print(f"   ❌ Collection '{COLLECTION_NAME}' does not exist.")
+        return False
+
+    count_result = client.count(collection_name=COLLECTION_NAME)
+    count = count_result.count
+    print(f"   > Documents in DB: {count}")
+
+    if count == 0:
+        print("   ⚠️ WARNING: Collection exists but is empty. Did you run ingestion?")
+        return False
+    return True
 
 
 # --- PART 1: DATA INGESTION ---
@@ -79,20 +100,31 @@ def ingest_data(pdf_path=None, audio_path=None):
     all_text = ""
     if pdf_path: all_text += extract_pdf_text(pdf_path)
     if audio_path: all_text += transcribe_audio(audio_path)
-    if not all_text.strip(): return
+    if not all_text.strip():
+        print("❌ No text extracted. Ingestion aborted.")
+        return
 
     chunks = chunk_text(all_text)
+    print(f"   > Prepared {len(chunks)} chunks for ingestion.")
+
     if client.collection_exists(COLLECTION_NAME):
         client.delete_collection(COLLECTION_NAME)
+
+    # Create collection with STRICT vector size
     client.create_collection(
         COLLECTION_NAME,
-        vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE)
+        vectors_config=models.VectorParams(size=VECTOR_SIZE, distance=models.Distance.COSINE)
     )
+
     vector_store = QdrantVectorStore(
-        client=client, collection_name=COLLECTION_NAME, embedding=embeddings, content_payload_key="page_content"
+        client=client,
+        collection_name=COLLECTION_NAME,
+        embedding=embeddings,
+        content_payload_key="page_content"
     )
+
     vector_store.add_texts(chunks)
-    print("Ingestion Complete.")
+    print("✅ Ingestion Complete. Data stored in Qdrant.")
 
 
 # --- PART 2: AGENT STATE ---
@@ -111,11 +143,7 @@ def create_initial_state(question):
 # --- PART 3: FUNCTIONAL TOOLS ---
 
 def save_to_file_tool(question, answer, source):
-    print("--- 💾 SAVING TO FILE ---")
-    """
-    Saves the QA pair to a file.
-    Now strictly a helper function, not called inside other logic.
-    """
+    """Helper function to log data."""
     try:
         with open("agent_output.txt", "a", encoding="utf-8") as f:
             f.write(f"\n{'=' * 20}\nSOURCE: {source}\nQ: {question}\nA: {answer}\n")
@@ -126,31 +154,64 @@ def save_to_file_tool(question, answer, source):
 
 def retrieve(state):
     print(f"--- 🔍 RETRIEVING: {state['question']} ---")
-    if not client.collection_exists(COLLECTION_NAME):
+
+    # Diagnostic check before retrieval
+    if not check_collection_status():
         state["documents"] = []
         return state
 
-    vector_store = QdrantVectorStore(client=client, collection_name=COLLECTION_NAME, embedding=embeddings,
-                                     content_payload_key="page_content")
-    docs = vector_store.as_retriever(search_kwargs={"k": 3}).invoke(state["question"])
-    state["documents"] = [d.page_content for d in docs]
+    vector_store = QdrantVectorStore(
+        client=client,
+        collection_name=COLLECTION_NAME,
+        embedding=embeddings,
+        content_payload_key="page_content"
+    )
+
+    # Retrieve
+    try:
+        docs = vector_store.as_retriever(search_kwargs={"k": 3}).invoke(state["question"])
+        print(f"   > Found {len(docs)} documents.")
+        state["documents"] = [d.page_content for d in docs]
+    except Exception as e:
+        print(f"   ❌ Retrieval Error: {e}")
+        state["documents"] = []
+
     return state
 
 
 def grade_documents(state):
-    print("--- 🧠 GRADING DOCUMENTS ---")
+    print("--- 🧠 GRADING DOCUMENTS (Topic Match) ---")
     if not state["documents"]:
         state["relevance"] = "no"
         return state
 
+    # 🚀 NEW PROMPT STRATEGY:
+    # 1. Be an "optimistic" filter, not a strict grader.
+    # 2. Explicitly forbid checking for "completeness".
+    # 3. Force it to look for simple keyword/topic overlap.
     prompt = ChatPromptTemplate.from_template(
-        "Is this document relevant to: {question}? Doc: {context}. Return ONLY 'yes' or 'no'."
+        """You are a basic relevance filter. You do NOT check for accuracy. You do NOT check for completeness.
+
+        If the document contains ANY keywords or concepts related to the question, you MUST say 'yes'.
+
+        Question: {question}
+        Document: {context}
+
+        Constraint: Even if the document is short or imperfect, if it mentions the topic, answer 'yes'.
+
+        Return ONLY the word 'yes' or 'no'."""
     )
+
     chain = prompt | local_llm | StrOutputParser()
     score = chain.invoke({"question": state["question"], "context": state["documents"][0]})
 
-    state["relevance"] = "yes" if "yes" in score.lower() else "no"
-    print(f"--- GRADE: {state['relevance'].upper()} ---")
+    # 4. Fallback Logic for Small Models
+    # Sometimes 1B models still ramble ("I think yes because...").
+    # We check if 'yes' appears anywhere in the first 20 chars to catch that.
+    is_relevant = "yes" in score.lower()[:20]
+
+    state["relevance"] = "yes" if is_relevant else "no"
+    print(f"--- GRADE: {state['relevance'].upper()} (Raw: {score.strip()}) ---")
     return state
 
 
@@ -159,16 +220,13 @@ def generate_rag(state):
     prompt = ChatPromptTemplate.from_template("Answer based on context: {context}. Q: {question}")
     chain = prompt | local_llm | StrOutputParser()
     answer = chain.invoke({"question": state["question"], "context": "\n".join(state["documents"])})
-
-    # REMOVED: save_to_file_tool(...) call
-
     state["answer"] = answer
     state["source"] = "rag"
     return state
 
 
 def perform_web_search(state):
-    print("--- 🌍 WEB SEARCH (Step 1/2) ---")
+    print("--- 🌍 WEB SEARCH ---")
     try:
         results = search_tool.invoke(state["question"])
     except:
@@ -176,18 +234,15 @@ def perform_web_search(state):
 
     prompt = ChatPromptTemplate.from_template("Answer based on web results: {context}. Q: {question}")
     answer = (prompt | local_llm | StrOutputParser()).invoke({"question": state["question"], "context": results})
-
-    # REMOVED: save_to_file_tool(...) call
-
     state["answer"] = answer
     state["source"] = "web"
     return state
 
 
 def generate_social_post(state):
-    print("--- 📢 GENERATING SOCIAL POST (Step 2/2) ---")
-    # Kept your simple string concatenation logic
-    state["answer"] += "\n\n--- [GENERATED SOCIAL POST] ---\n[Fun with #Ciklum and #CiklumAiAcademy!]\n" + state["answer"]
+    print("--- 📢 GENERATING SOCIAL POST ---")
+    state["answer"] += "\n\n--- [GENERATED SOCIAL POST] ---\n[Fun with #Ciklum and #CiklumAiAcademy!]\n" + state[
+        "answer"]
     return state
 
 
@@ -220,35 +275,23 @@ def run_agent_workflow(question):
     if state["relevance"] == "yes":
         # --- RAG PATH ---
         state = generate_rag(state)
-
-        # ✅ EXPLICIT SAVE (Orchestration level)
         save_to_file_tool(state["question"], state["answer"], "RAG")
-
         state = evaluate_answer(state)
 
         # 4. Retry Loop
         if state["eval_score"] < 3:
             print("--- 🔄 LOW RAG SCORE. RETRYING WITH WEB... ---")
-
-            # --- WEB PATH (Retry) ---
             state = perform_web_search(state)
-
-            # ✅ EXPLICIT SAVE (Orchestration level)
             save_to_file_tool(state["question"], state["answer"], "WEB (RETRY)")
-
             state = generate_social_post(state)
             state = evaluate_answer(state)
-
     else:
         # --- WEB PATH (Direct) ---
         print("--- DOCUMENTS IRRELEVANT. SWITCHING TO WEB. ---")
         state = perform_web_search(state)
-
-        # ✅ EXPLICIT SAVE (Orchestration level)
-        save_to_file_tool(state["question"], state["answer"], "WEB (DIRECT)")
-
-        state = generate_social_post(state)
         state = evaluate_answer(state)
+        save_to_file_tool(state["question"], state["answer"], "WEB (DIRECT)")
+        state = generate_social_post(state)
 
     return state
 
@@ -263,13 +306,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.pdf: ingest_data(pdf_path=args.pdf)
-
     if args.audio: ingest_data(audio_path=args.audio)
 
     if args.query:
         print(f"\n🚀 STARTING AGENT FOR: '{args.query}'\n")
-
-        # Run the Python-only orchestrator
         final_state = run_agent_workflow(args.query)
-
         print(f"\nFINAL ANSWER:\n{final_state['answer']}")
