@@ -47,7 +47,7 @@ The system is built on a **pure Python orchestration layer** (replacing rigid gr
                     |                                     |
                     v                                     |
              +------+------+                              |
-             | 6. EVALUATOR|                              |
+             | 5. EVALUATOR|                              |
              | (Score 1-5) |                              |
              +------+------+                              |
                     |                                     |
@@ -64,7 +64,7 @@ The system is built on a **pure Python orchestration layer** (replacing rigid gr
                     |                                     
                     v                                     
            +--------+--------+                          
-           | 6. Generate post|                          
+           | 7. Generate post|                          
            +--------+--------+  
                     |
                     v 
