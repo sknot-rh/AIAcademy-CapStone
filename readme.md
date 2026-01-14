@@ -50,3 +50,9 @@ Load your specific documents or audio recordings into the vector database.
 python agent_rag.py --pdf documents/manual.pdf
 # OR
 python agent_rag.py --audio recordings/meeting.mp3
+```
+
+### 2. Query a question
+```bash
+python agent_rag.py --query "What is the return policy for online purchases?"
+```
