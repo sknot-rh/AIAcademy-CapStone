@@ -47,12 +47,12 @@ It moves beyond simple "retrieval" by incorporating self-reflection, autonomous 
 ### 1. Ingest Data (Data Preparation)
 Load your specific documents or audio recordings into the vector database.
 ```bash
-python agent_rag.py --pdf documents/manual.pdf
+python main.py --pdf documents/manual.pdf
 # OR
-python agent_rag.py --audio recordings/meeting.mp3
+python main.py --audio recordings/meeting.mp3
 ```
 
 ### 2. Query a question
 ```bash
-python agent_rag.py --query "What is the return policy for online purchases?"
+python main.py --query "What is the return policy for online purchases?"
 ```
