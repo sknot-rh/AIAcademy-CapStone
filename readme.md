@@ -56,3 +56,9 @@ python main.py --audio recordings/meeting.mp3
 ```bash
 python main.py --query "What is the return policy for online purchases?"
 ```
+
+## Testing
+To run all the unit tests, execute from root folder:
+```bash
+python -m pytest .\tests\tests.py
+```

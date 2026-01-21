@@ -135,6 +135,7 @@ def retrieve(state):
         docs = vector_store.as_retriever(search_kwargs={"k": 3}).invoke(state["question"])
         state["documents"] = [d.page_content for d in docs]
     except:
+        print("Error during retrieval. As a fallback, no documents found.")
         state["documents"] = []
     return state
 
@@ -188,6 +189,7 @@ def _perform_single_web_search(state):
     try:
         results = search_tool.invoke(state["question"])
     except:
+        print("Error during web search. Returning 'No results found'.")
         results = "No results found."
 
     prompt = ChatPromptTemplate.from_template("Answer based on web results: {context}. QUESTION: {question}")
@@ -218,9 +220,12 @@ def evaluate_answer(state):
         Rate relevance 1-5. Return ONLY integer."""
     )
     chain = prompt | local_llm | StrOutputParser()
+    str_val = ""
     try:
-        score = int(chain.invoke({"question": state["question"], "answer": state["answer"]}).strip())
+        str_val = chain.invoke({"question": state["question"], "answer": state["answer"]}).strip()
+        score = int(str_val)
     except:
+        print("Error parsing score (" + str_val + "). Defaulting to 3.")
         score = 3
     print(f"--- SCORE: {score}/5 ---")
     state["eval_score"] = score
